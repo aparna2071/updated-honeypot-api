@@ -90,11 +90,25 @@ async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None))
         },
         "required": ["scamDetected", "language"]
     }
+    
+    detection_prompt = f"""
+    You are a cybersecurity scam detection agent.
 
-    detection = get_gemini_json(
-        f"Detect scam and language in: {data.message.text}\nHistory: {history_str}",
-        detect_schema
-    )
+    TASK:
+    - Decide if the message is a SCAM.
+    - Treat ANY message asking for money, payment, UPI, links, urgency, threats, or account blocking as a SCAM.
+
+    MESSAGE:
+    {data.message.text}
+
+    CONVERSATION HISTORY:
+    {history_str}
+
+    Return JSON only.
+    """
+
+    detection = get_gemini_json(detection_prompt, detect_schema)
+
 
     scam_detected = detection.get("scamDetected", False)
     detected_lang = detection.get("language", "English")
@@ -158,3 +172,4 @@ async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None))
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
