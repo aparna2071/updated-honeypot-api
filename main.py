@@ -4,11 +4,10 @@ load_dotenv()
 import os
 import json
 import requests
-from fastapi import FastAPI, HTTPException, Header, Body
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from typing import List, Optional
 from google import genai
-from datetime import datetime
 
 # Initialize FastAPI and Gemini
 app = FastAPI()
@@ -35,18 +34,40 @@ class HoneypotRequest(BaseModel):
     conversationHistory: List[Message] = []
     metadata: Optional[Metadata] = None
 
-# --- Gemini Logic ---
+
+# --- Gemini Helpers (OPTIMIZED) ---
 def get_gemini_json(prompt: str, schema: dict):
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config={"response_mime_type": "application/json", "response_schema": schema}
-    )
-    return json.loads(response.text)
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": schema,
+                "max_output_tokens": 512,   # ✅ reduced
+                "temperature": 0.3
+            },
+            timeout=10  # ✅ hard timeout
+        )
+        return json.loads(response.text)
+    except Exception:
+        return {}
 
 def get_gemini_text(prompt: str):
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-    return response.text
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config={
+                "max_output_tokens": 60,   # ✅ very small
+                "temperature": 0.4
+            },
+            timeout=10  # ✅ hard timeout
+        )
+        return response.text
+    except Exception:
+        return "Oh no… what should I do?"
+
 
 # --- API Endpoints ---
 @app.post("/honeypot")
@@ -54,9 +75,11 @@ async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None))
     if x_api_key != SECRET_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
-    history_str = "\n".join([f"{m.sender}: {m.text}" for m in data.conversationHistory])
-    
-    # STEP 1: SCAM DETECTION & LANGUAGE ANALYSIS
+    # ✅ LIMIT HISTORY (last 6 messages only)
+    limited_history = data.conversationHistory[-6:]
+    history_str = "\n".join([f"{m.sender}: {m.text}" for m in limited_history])
+
+    # STEP 1: SCAM DETECTION & LANGUAGE
     detect_schema = {
         "type": "OBJECT",
         "properties": {
@@ -67,18 +90,31 @@ async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None))
         },
         "required": ["scamDetected", "language"]
     }
-    detection = get_gemini_json(f"Detect scam and language in: {data.message.text}\nHistory: {history_str}", detect_schema)
-    
+
+    detection = get_gemini_json(
+        f"Detect scam and language in: {data.message.text}\nHistory: {history_str}",
+        detect_schema
+    )
+
     scam_detected = detection.get("scamDetected", False)
     detected_lang = detection.get("language", "English")
-    
-    if not scam_detected:
-        return {"status": "success", "scamDetected": False, "agentReply": "What is this?"}
 
-    # STEP 2: ENGAGEMENT (SHORT & LANGUAGE MIRRORED)
-    engage_prompt = f"Act as a naive victim. REPLY IN {detected_lang}. KEEP IT SHORT (max 12 words). Latest: {data.message.text}"
+    if not scam_detected:
+        return {
+            "status": "success",
+            "scamDetected": False,
+            "agentReply": "What is this?"
+        }
+
+    # STEP 2: ENGAGEMENT (SHORT)
+    engage_prompt = (
+        f"Act as a naive victim. "
+        f"REPLY IN {detected_lang}. "
+        f"KEEP IT SHORT (max 12 words). "
+        f"Latest: {data.message.text}"
+    )
     agent_reply = get_gemini_text(engage_prompt)
-    
+
     # STEP 3: INTELLIGENCE EXTRACTION
     extract_schema = {
         "type": "OBJECT",
@@ -90,18 +126,22 @@ async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None))
             "suspiciousKeywords": {"type": "ARRAY", "items": {"type": "STRING"}}
         }
     }
-    intelligence = get_gemini_json(f"Extract intel from: {history_str}\n{data.message.text}", extract_schema)
 
-    # STEP 4: MANDATORY GUVI CALLBACK
+    intelligence = get_gemini_json(
+        f"Extract intel from:\n{history_str}\n{data.message.text}",
+        extract_schema
+    )
+
+    # STEP 4: GUVI CALLBACK (non-blocking)
     try:
         payload = {
             "sessionId": data.sessionId,
             "scamDetected": True,
-            "totalMessagesExchanged": len(data.conversationHistory) + 2,
+            "totalMessagesExchanged": len(limited_history) + 2,
             "extractedIntelligence": intelligence,
             "agentNotes": f"Detected {detection.get('scamType', 'scam')} in {detected_lang}"
         }
-        requests.post(GUVI_EVAL_URL, json=payload, timeout=5)
+        requests.post(GUVI_EVAL_URL, json=payload, timeout=3)  # ✅ reduced timeout
     except Exception:
         pass
 
@@ -112,4 +152,9 @@ async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None))
         "agentReply": agent_reply,
         "extractedIntelligence": intelligence
     }
-  
+
+
+# ✅ HEALTH CHECK (optional but recommended)
+@app.get("/health")
+def health():
+    return {"status": "ok"}
