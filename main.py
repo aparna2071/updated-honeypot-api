@@ -130,6 +130,10 @@ async def honeypot_handler(request: HoneypotRequest, x_api_key: str = Header(Non
     }
 
     detection = get_gemini_json(detection_prompt, detect_schema)
+
+    if not detection:
+       detection = {"scamDetected": True, "language": "English", "scamType": "other", "reason": "model_fallback"}
+
     scam_detected = detection.get("scamDetected", False)
     detected_lang = detection.get("language", "English")
 
@@ -253,6 +257,7 @@ async def honeypot_handler(request: HoneypotRequest, x_api_key: str = Header(Non
         "agentNotes": agent_notes,
         "agentReply": agent_reply
     }
+
 
 
 
