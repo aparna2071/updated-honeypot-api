@@ -4,11 +4,11 @@ load_dotenv()
 import os
 import json
 import requests
-from fastapi import FastAPI, HTTPException, Header, Body
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Header
+from pydantic import BaseModel, Field
 from typing import List, Optional
 from google import genai
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # Initialize FastAPI and Gemini
 app = FastAPI()
@@ -17,6 +17,10 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 # --- Configuration ---
 GUVI_EVAL_URL = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 SECRET_API_KEY = os.getenv("X_API_KEY", "your-secure-key")
+INACTIVITY_THRESHOLD_SECONDS = 120  # 2 minutes
+
+# --- Session Memory ---
+SESSIONS = {}  # sessionId -> {"history": [], "agent_replies": []}
 
 # --- Models ---
 class Message(BaseModel):
@@ -32,8 +36,9 @@ class Metadata(BaseModel):
 class HoneypotRequest(BaseModel):
     sessionId: str
     message: Message
-    conversationHistory: List[Message] = []
+    conversationHistory: List[Message] = Field(default_factory=list)
     metadata: Optional[Metadata] = None
+    isLastMessage: Optional[bool] = False  # Optional platform flag for last message
 
 # --- Gemini Logic ---
 def get_gemini_json(prompt: str, schema: dict):
@@ -48,43 +53,94 @@ def get_gemini_text(prompt: str):
     response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
     return response.text
 
-# --- API Endpoints ---
+# --- Helper Functions ---
+def compute_engagement_duration(history: List[Message]):
+    if not history:
+        return 0
+    first_ts = datetime.fromisoformat(history[0].timestamp.replace("Z", "+00:00"))
+    last_ts = datetime.fromisoformat(history[-1].timestamp.replace("Z", "+00:00"))
+    return int((last_ts - first_ts).total_seconds())
+
+# --- API Endpoint ---
 @app.post("/honeypot")
-async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None)):
+async def honeypot_handler(request: HoneypotRequest, x_api_key: str = Header(None)):
     if x_api_key != SECRET_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
-    history_str = "\n".join([f"{m.sender}: {m.text}" for m in data.conversationHistory])
-    
-    # STEP 1: SCAM DETECTION & LANGUAGE ANALYSIS
+    # --- Build conversation history string ---
+    history_str = "\n".join([f"{m.sender}: {m.text}" for m in request.conversationHistory])
+
+    # --- STEP 1: SCAM DETECTION & LANGUAGE ANALYSIS ---
+    detection_prompt = f"""
+    You are a cybersecurity fraud analyst.
+
+    Classify the message below.
+
+    Decide if it is a SCAM using behavioral patterns:
+    - urgency, fear, rewards, fake authority
+    - requests for money, OTP, links, verification
+    - impersonation (bank, delivery, police, govt)
+    - emotional manipulation (grandson, accident, prize)
+    - shortened URLs or payment requests
+
+    Return STRICT JSON only.
+
+    Message:
+    {request.message.text}
+
+    Conversation history:
+    {history_str}
+    """
+
     detect_schema = {
         "type": "OBJECT",
         "properties": {
             "scamDetected": {"type": "BOOLEAN"},
             "reason": {"type": "STRING"},
-            "scamType": {"type": "STRING"},
+            "scamType": {
+                "type": "STRING",
+                "enum": ["phishing", "delivery", "bank", "romance", "tech_support", "investment", "govt", "other"]
+            },
             "language": {"type": "STRING"}
         },
-        "required": ["scamDetected", "language"]
+        "required": ["scamDetected", "language", "scamType"]
     }
-    detection = get_gemini_json(f"Detect scam and language in: {data.message.text}\nHistory: {history_str}", detect_schema)
-    
+
+    detection = get_gemini_json(detection_prompt, detect_schema)
     scam_detected = detection.get("scamDetected", False)
     detected_lang = detection.get("language", "English")
-    
-    if not scam_detected:
-        return {"status": "success", "scamDetected": False, "agentReply": "What is this?"}
 
-    # STEP 2: ENGAGEMENT (SHORT & LANGUAGE MIRRORED)
+    if not scam_detected:
+        # No callback needed if not a scam
+        return {
+            "status": "success",
+            "scamDetected": False,
+            "language": detected_lang,
+            "agentReply": None,
+            "extractedIntelligence": None
+        }
+
+    # --- Initialize session memory if not exists ---
+    if request.sessionId not in SESSIONS:
+        SESSIONS[request.sessionId] = {
+            "history": request.conversationHistory.copy(),
+            "agent_replies": []
+        }
+
+    # Append latest message to session history
+    SESSIONS[request.sessionId]["history"].append(request.message)
+
+    # --- STEP 2: ENGAGEMENT ---
     engage_prompt = f"""
-    You are a HONEYPOT VICTIM human persona.
+    You are a human interacting with a potential scammer.
 
     PRIMARY GOALS:
     - Keep the scammer engaged for as long as possible.
     - Coax the scammer into revealing THEIR phone, UPI details, bank details, links, or payment methods.
 
     STRICT RULES:
-    - NEVER reveal to the scammer that this is a honeypot agent or that a scam is detected.
+    - NEVER reveal to the scammer that you are an AI or a scam detection system.
+    - NEVER reveal to the scammer that a scam is detected.
     - NEVER give your own phone number, UPI details, bank details, OTP, card details, password, payment info or any other personal credentials.
     - NEVER invent or leak credentials.
     - Do NOT mention law, police, or fraud.
@@ -100,13 +156,16 @@ async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None))
     {history_str}
 
     Latest scammer message:
-    {data.message.text}
+    {request.message.text}
 
     Respond as a confused human victim who wants to proceed.
     """
     agent_reply = get_gemini_text(engage_prompt)
-    
-    # STEP 3: INTELLIGENCE EXTRACTION
+    SESSIONS[request.sessionId]["agent_replies"].append(agent_reply)
+
+    # --- STEP 3: INTELLIGENCE EXTRACTION ---
+    full_history_str = "\n".join([f"{m.sender}: {m.text}" for m in SESSIONS[request.sessionId]["history"]])
+    intelligence_prompt = f"Extract intelligence from this conversation:\n{full_history_str}"
     extract_schema = {
         "type": "OBJECT",
         "properties": {
@@ -117,27 +176,60 @@ async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None))
             "suspiciousKeywords": {"type": "ARRAY", "items": {"type": "STRING"}}
         }
     }
-    intelligence = get_gemini_json(f"Extract intel from: {history_str}\n{data.message.text}", extract_schema)
+    intelligence = get_gemini_json(intelligence_prompt, extract_schema)
 
-    # STEP 4: MANDATORY GUVI CALLBACK
-    try:
+    # --- Compute engagement duration ---
+    engagement_seconds = compute_engagement_duration(SESSIONS[request.sessionId]["history"])
+
+    # --- Construct improved agentNotes ---
+    agent_notes = (
+        f"ScamType: {detection.get('scamType','other')}; "
+        f"Reason: {detection.get('reason','not specified')}; "
+        f"Language: {detected_lang}; "
+        f"Total messages: {len(SESSIONS[request.sessionId]['history']) + len(SESSIONS[request.sessionId]['agent_replies'])}"
+    )
+
+    # --- STEP 4: DYNAMIC CALLBACK DECISION ---
+    total_messages = len(SESSIONS[request.sessionId]["history"]) + len(SESSIONS[request.sessionId]["agent_replies"])
+    send_callback = False
+
+    # 1️⃣ If platform explicitly marks last message
+    if request.isLastMessage:
+        send_callback = True
+    else:
+        # 2️⃣ If inactivity threshold exceeded
+        last_msg_ts = datetime.fromisoformat(SESSIONS[request.sessionId]["history"][-1].timestamp.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        if (now - last_msg_ts).total_seconds() > INACTIVITY_THRESHOLD_SECONDS:
+            send_callback = True
+
+    if send_callback:
         payload = {
-            "sessionId": data.sessionId,
+            "sessionId": request.sessionId,
             "scamDetected": True,
-            "totalMessagesExchanged": len(data.conversationHistory) + 2,
+            "totalMessagesExchanged": total_messages,
             "extractedIntelligence": intelligence,
-            "agentNotes": f"Detected {detection.get('scamType', 'scam')} in {detected_lang}"
+            "agentNotes": agent_notes
         }
-        requests.post(GUVI_EVAL_URL, json=payload, timeout=5)
-    except Exception:
-        pass
+        try:
+            requests.post(GUVI_EVAL_URL, json=payload, timeout=5)
+        except Exception as e:
+            print("GUVI callback failed:", e)
+        # clear session after final callback
+        del SESSIONS[request.sessionId]
 
+    # --- STEP 5: RETURN RESPONSE ---
     return {
         "status": "success",
         "scamDetected": True,
-        "language": detected_lang,
-        "agentReply": agent_reply,
-        "extractedIntelligence": intelligence
+        "engagementMetrics": {
+            "engagementDurationSeconds": engagement_seconds,
+            "totalMessagesExchanged": total_messages
+        },
+        "extractedIntelligence": intelligence,
+        "agentNotes": agent_notes,
+        "agentReply": agent_reply
     }
-  
+
+
 
