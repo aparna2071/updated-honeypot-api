@@ -42,16 +42,39 @@ class HoneypotRequest(BaseModel):
 
 # --- Gemini Logic ---
 def get_gemini_json(prompt: str, schema: dict):
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config={"response_mime_type": "application/json", "response_schema": schema}
-    )
-    return json.loads(response.text)
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config={"response_mime_type": "application/json", "response_schema": schema}
+        )
+
+        if not response.text:
+            return {}
+
+        return json.loads(response.text)
+
+    except Exception as e:
+        print("Gemini JSON error:", e)
+        return {}
+
 
 def get_gemini_text(prompt: str):
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-    return response.text
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+
+        if not response.text:
+            return "Sorry, could you repeat that?"
+
+        return response.text.strip()
+
+    except Exception as e:
+        print("Gemini text error:", e)
+        return "Sorry, could you repeat that?"
+
 
 # --- Helper Functions ---
 def compute_engagement_duration(history: List[Message]):
@@ -230,6 +253,7 @@ async def honeypot_handler(request: HoneypotRequest, x_api_key: str = Header(Non
         "agentNotes": agent_notes,
         "agentReply": agent_reply
     }
+
 
 
 
