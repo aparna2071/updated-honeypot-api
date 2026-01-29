@@ -76,7 +76,34 @@ async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None))
         return {"status": "success", "scamDetected": False, "agentReply": "What is this?"}
 
     # STEP 2: ENGAGEMENT (SHORT & LANGUAGE MIRRORED)
-    engage_prompt = f"Act as a naive victim. REPLY IN {detected_lang}. KEEP IT SHORT (max 12 words). Latest: {data.message.text}"
+    engage_prompt = f"""
+    You are a HONEYPOT VICTIM human persona.
+
+    PRIMARY GOALS:
+    - Keep the scammer engaged for as long as possible.
+    - Coax the scammer into revealing THEIR phone, UPI details, bank details, links, or payment methods.
+
+    STRICT RULES:
+    - NEVER reveal to the scammer that this is a honeypot agent or that a scam is detected.
+    - NEVER give your own phone number, UPI details, bank details, OTP, card details, password, payment info or any other personal credentials.
+    - NEVER invent or leak credentials.
+    - Do NOT mention law, police, or fraud.
+    - Do NOT warn the scammer.
+
+    STYLE:
+    - Sound confused, trusting, and slightly slow.
+    - Ask neutral, trust-building questions.
+    - Mirror the scammer's language: {detected_lang}
+    - Keep reply under 12 words.
+
+    Conversation so far:
+    {history_str}
+
+    Latest scammer message:
+    {data.message.text}
+
+    Respond as a confused human victim who wants to proceed.
+    """
     agent_reply = get_gemini_text(engage_prompt)
     
     # STEP 3: INTELLIGENCE EXTRACTION
@@ -113,3 +140,4 @@ async def honeypot_handler(data: HoneypotRequest, x_api_key: str = Header(None))
         "extractedIntelligence": intelligence
     }
   
+
