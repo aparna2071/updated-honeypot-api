@@ -74,15 +74,41 @@ def get_gemini_text(prompt: str):
     except Exception as e:
         print("Gemini text error:", e)
         return "Sorry, could you repeat that?"
+        
+def safe_parse_ts(ts):
+    """
+    Accepts:
+    - ISO string: 2026-01-27T12:00:00Z
+    - ISO w/o Z
+    - Unix float/string: 1769769336.6467764
+    Returns timezone-aware UTC datetime
+    """
+    try:
+        # numeric unix timestamps
+        if isinstance(ts, (int, float)):
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+        # string unix timestamp
+        if isinstance(ts, str) and ts.replace(".", "", 1).isdigit():
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+
+        # ISO timestamp
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+    except Exception as e:
+        print("Bad timestamp:", ts, e)
+        return datetime.now(timezone.utc)
+
 
 
 # --- Helper Functions ---
 def compute_engagement_duration(history: List[Message]):
     if not history:
         return 0
-    first_ts = datetime.fromisoformat(history[0].timestamp.replace("Z", "+00:00"))
-    last_ts = datetime.fromisoformat(history[-1].timestamp.replace("Z", "+00:00"))
+    first_ts = safe_parse_ts(history[0].timestamp)
+    last_ts = safe_parse_ts(history[-1].timestamp)
     return int((last_ts - first_ts).total_seconds())
+
 
 # --- API Endpoint ---
 @app.post("/honeypot")
@@ -225,7 +251,8 @@ async def honeypot_handler(request: HoneypotRequest, x_api_key: str = Header(Non
         send_callback = True
     else:
         # 2️⃣ If inactivity threshold exceeded
-        last_msg_ts = datetime.fromisoformat(SESSIONS[request.sessionId]["history"][-1].timestamp.replace("Z", "+00:00"))
+        last_msg_ts = safe_parse_ts(SESSIONS[request.sessionId]["history"][-1].timestamp)
+
         now = datetime.now(timezone.utc)
         if (now - last_msg_ts).total_seconds() > INACTIVITY_THRESHOLD_SECONDS:
             send_callback = True
@@ -257,6 +284,7 @@ async def honeypot_handler(request: HoneypotRequest, x_api_key: str = Header(Non
         "agentNotes": agent_notes,
         "agentReply": agent_reply
     }
+
 
 
 
