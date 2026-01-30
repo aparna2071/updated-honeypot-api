@@ -275,6 +275,7 @@ async def honeypot_handler(request: HoneypotRequest, x_api_key: str = Header(Non
     # --- STEP 5: RETURN RESPONSE ---
     return {
         "status": "success",
+        "processStatus": "completed", 
         "scamDetected": True,
         "engagementMetrics": {
             "engagementDurationSeconds": engagement_seconds,
@@ -284,6 +285,7 @@ async def honeypot_handler(request: HoneypotRequest, x_api_key: str = Header(Non
         "agentNotes": agent_notes,
         "agentReply": agent_reply
     }
+
 
 
 
